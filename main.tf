@@ -1,80 +1,60 @@
-provider "aws" {
-  region = var.aws_region
+terraform {
+apt-get update -y
+
+
+echo "[userdata] install base packages"
+apt-get install -y nginx unzip curl awscli
+
+
+echo "[userdata] install Node.js 18"
+curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+apt-get install -y nodejs build-essential
+
+
+echo "[userdata] create workspace"
+mkdir -p /tmp/frontend
+
+
+echo "[userdata] download frontend from S3"
+aws s3 cp s3://${aws_s3_bucket.frontend_bucket.bucket}/${aws_s3_bucket_object.frontend_zip.key} /tmp/frontend.zip --region ${var.aws_region}
+
+
+echo "[userdata] unzip"
+unzip -o /tmp/frontend.zip -d /tmp/frontend || true
+
+
+# If package.json exists -> build; else use build/ or index.html directly
+if [ -f /tmp/frontend/package.json ]; then
+cd /tmp/frontend
+echo "[userdata] package.json found, running npm ci & build"
+npm ci --silent || npm install --silent
+npm run build --silent || true
+SRC_DIR="/tmp/frontend/build"
+elif [ -d /tmp/frontend/build ]; then
+SRC_DIR="/tmp/frontend/build"
+elif [ -f /tmp/frontend/index.html ]; then
+SRC_DIR="/tmp/frontend"
+else
+echo "[userdata] No build found and no package.json; exiting" > /var/log/user-data.log
+exit 1
+fi
+
+
+echo "[userdata] deploying files to nginx html root"
+rm -rf /var/www/html/*
+cp -r ${SRC_DIR}/* /var/www/html/
+chown -R www-data:www-data /var/www/html
+
+
+systemctl enable nginx
+systemctl restart nginx
+echo "[userdata] finished"
+EOF
 }
 
-resource "aws_instance" "react_app" {
-  ami           = "ami-08c40ec9ead489470" # Ubuntu 22.04
-  instance_type = "t2.micro"
-  key_name      = var.key_name
 
-  vpc_security_group_ids = [aws_security_group.react_sg.id]
-
-  user_data = <<-EOF
-    #!/bin/bash
-    exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
-
-    echo "===== USER DATA STARTED ====="
-
-    # Update & install basics
-    apt-get update -y
-    apt-get install -y curl git nginx
-
-    # Install Node.js LTS
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
-    apt-get install -y nodejs build-essential
-
-    # Clone repo
-    rm -rf /home/ubuntu/reactapp
-    git clone ${var.github_repo} /home/ubuntu/reactapp
-    cd /home/ubuntu/reactapp
-
-    # Build react app
-    npm install
-    npm run build
-
-    # Copy build files to nginx root
-    rm -rf /var/www/html/*
-    cp -r build/* /var/www/html/
-
-    # Fix permissions
-    chown -R www-data:www-data /var/www/html
-    chmod -R 755 /var/www/html
-
-    # Restart nginx
-    sleep 5
-    systemctl enable nginx
-    systemctl restart nginx
-
-    echo "===== USER DATA FINISHED ====="
-  EOF
-
-  tags = {
-    Name = "react-app-server"
-  }
-}
-
-resource "aws_security_group" "react_sg" {
-  name        = "react-sg"
-  description = "Allow HTTP and SSH"
-
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+# Elastic IP (optional but gives stable public IP)
+resource "aws_eip" "react_eip" {
+instance = aws_instance.react_app.id
+vpc = true
 }
